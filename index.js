@@ -12,8 +12,8 @@ const config = {
 };
 
 const app = express();
-app.use(express.json());
-app.use(middleware(config));
+app.use(middleware(config));  // ← これだけでOK。express.json() は削除済み！
+
 const client = new Client(config);
 
 app.post("/webhook", async (req, res) => {
@@ -42,7 +42,7 @@ app.post("/webhook", async (req, res) => {
     } else {
       await client.replyMessage(event.replyToken, {
         type: "text",
-        text: `❌ 体重を読み取れませんでした。\n画像が鮮明か確認してください。`,
+        text: `❌ 体重を読み取れませんでした。\n画像をはっきり撮ってみてください。`,
       });
     }
 
