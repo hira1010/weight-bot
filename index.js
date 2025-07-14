@@ -1,78 +1,85 @@
 const express = require('express');
-const line = require('@line/bot-sdk');
 const multer = require('multer');
 const fs = require('fs');
-const path = require('path');
 const Tesseract = require('tesseract.js');
-const { GoogleSpreadsheet } = require('google-spreadsheet');
-require('dotenv').config();
-
-const config = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_CHANNEL_SECRET
-};
-
+const { google } = require('googleapis');
+const path = require('path');
 const app = express();
-const client = new line.Client(config);
+const port = process.env.PORT || 3000;
+
+// Google Sheets認証情報
+const auth = new google.auth.GoogleAuth({
+  credentials: {
+    type: 'service_account',
+    project_id: process.env.GCP_PROJECT_ID,
+    private_key_id: process.env.GCP_PRIVATE_KEY_ID,
+    private_key: process.env.GCP_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    client_email: process.env.GCP_CLIENT_EMAIL,
+    client_id: process.env.GCP_CLIENT_ID,
+  },
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
+const sheets = google.sheets({ version: 'v4', auth });
+
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SHEET_NAME = 'ログ';
+
+// 画像保存用
 const upload = multer({ dest: 'uploads/' });
 
-app.post('/webhook', line.middleware(config), async (req, res) => {
-  Promise.all(req.body.events.map(handleEvent)).then((result) => res.json(result));
-});
+app.use(express.json());
 
-async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'image') {
-    return Promise.resolve(null);
-  }
-
+app.post('/webhook', upload.single('image'), async (req, res) => {
   try {
-    const stream = await client.getMessageContent(event.message.id);
-    const tempPath = path.join(__dirname, 'temp.jpg');
-    const writer = fs.createWriteStream(tempPath);
-
-    stream.pipe(writer);
-
-    await new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
-
-    const result = await Tesseract.recognize(tempPath, 'eng+jpn', {
-      logger: (m) => console.log(m)
-    });
-
-    // weightっぽい数字を探す
-    const weightMatch = result.data.text.match(/(\d{2,3}\.\d)/);
-    const weight = weightMatch ? weightMatch[1] : null;
-
-    if (!weight) {
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '体重を読み取れませんでした。はっきり撮ってみてください。'
-      });
-    } else {
-      // スプレッドシートに書き込み（必要なら追加）
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `体重を ${weight} kg として記録しました。`
-      });
+    if (!req.file) {
+      console.log('⚠️ 画像が添付されていません');
+      return res.status(400).send('画像が必要です');
     }
 
-    // 🔧 安全にファイル削除（エラー無視）
-    fs.unlink(tempPath, (err) => {
-      if (err) console.error("画像削除エラー:", err);
+    const imagePath = req.file.path;
+    console.log("📷 画像パス:", imagePath);
+
+    const { data: { text } } = await Tesseract.recognize(
+      imagePath,
+      'eng',
+      { logger: m => console.log(m) }
+    );
+
+    console.log("🔍 OCR結果:", text);
+
+    const match = text.match(/(\d{2,3}(?:\.\d+)?)/);
+    if (!match) {
+      console.log("❌ 体重らしき数字が見つかりません");
+      return res.json({ reply: '体重を読み取れませんでした。はっきり撮ってみて。' });
+    }
+
+    const weight = parseFloat(match[1]);
+    const now = new Date();
+    const date = now.toLocaleDateString('ja-JP');
+    const time = now.toLocaleTimeString('ja-JP');
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[date, time, weight]],
+      },
     });
+
+    res.json({ reply: `体重 ${weight}kg を記録したよ！` });
+
+    // ファイル削除（存在確認付き）
+    if (fs.existsSync(imagePath)) {
+      fs.unlinkSync(imagePath);
+    }
 
   } catch (error) {
-    console.error("処理エラー:", error);
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '画像処理中にエラーが発生しました。'
-    });
+    console.error('🚨 エラー:', error);
+    res.status(500).send('サーバーエラー');
   }
-}
+});
 
-const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`Server running on ${port}`);
+  console.log(`✅ weight-bot is running on port ${port}`);
 });
